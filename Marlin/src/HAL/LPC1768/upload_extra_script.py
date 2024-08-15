@@ -23,94 +23,90 @@ if pioutil.is_pio_build():
 			  '(https://docs.platformio.org/en/latest/projectconf/section_env_upload.html) ' \
 			  'or copy the firmware (.pio/build/%s/firmware.bin) manually to the appropriate disk\n' \
 			  %(e, env.get('PIOENV')))
+import os
+import getpass
+import string
+import subprocess
+from ctypes import windll
 
-	def before_upload(source, target, env):
-		try:
-			#
-			# Find a disk for upload
-			#
-			upload_disk = 'Disk not found'
-			target_file_found = False
-			target_drive_found = False
-			if current_OS == 'Windows':
-				#
-				# platformio.ini will accept this for a Windows upload port designation: 'upload_port = L:'
-				#   Windows - doesn't care about the disk's name, only cares about the drive letter
-				import subprocess,string
-				from ctypes import windll
+def get_windows_drives():
+    """Returns a list of available drives on Windows."""
+    drives = []
+    bitmask = windll.kernel32.GetLogicalDrives()
+    for letter in string.ascii_uppercase:
+        if bitmask & 1:
+            drives.append(letter + ':\\')
+        bitmask >>= 1
+    return drives
 
-				# getting list of drives
-				# https://stackoverflow.com/questions/827371/is-there-a-way-to-list-all-the-available-drive-letters-in-python
-				drives = []
-				bitmask = windll.kernel32.GetLogicalDrives()
-				for letter in string.ascii_uppercase:
-					if bitmask & 1:
-						drives.append(letter)
-					bitmask >>= 1
+def find_windows_disk(target_drive, target_filename):
+    """Find the disk on Windows containing the target drive or file."""
+    for drive in get_windows_drives():
+        try:
+            volume_info = str(subprocess.check_output('cmd /C dir ' + drive, stderr=subprocess.STDOUT))
+        except Exception as e:
+            print(f'Error accessing {drive}: {e}')
+            continue
+        if target_drive in volume_info:
+            return drive, True
+        if target_filename in volume_info:
+            return drive, False
+    return None, None
 
-				for drive in drives:
-					final_drive_name = drive + ':\\'
-					# print ('disc check: {}'.format(final_drive_name))
-					try:
-						volume_info = str(subprocess.check_output('cmd /C dir ' + final_drive_name, stderr=subprocess.STDOUT))
-					except Exception as e:
-						print ('error:{}'.format(e))
-						continue
-					else:
-						if target_drive in volume_info and not target_file_found:  # set upload if not found target file yet
-							target_drive_found = True
-							upload_disk = final_drive_name
-						if target_filename in volume_info:
-							if not target_file_found:
-								upload_disk = final_drive_name
-							target_file_found = True
+def find_linux_disk(target_drive, target_filename):
+    """Find the disk on Linux containing the target drive or file."""
+    user_media_path = os.path.join(os.sep, 'media', getpass.getuser())
+    drives = os.listdir(user_media_path)
+    
+    if target_drive in drives:
+        return os.path.join(user_media_path, target_drive) + os.sep, True
+    
+    for drive in drives:
+        try:
+            files = os.listdir(os.path.join(user_media_path, drive))
+        except:
+            continue
+        if target_filename in files:
+            return os.path.join(user_media_path, drive) + os.sep, False
+    return None, None
 
-			elif current_OS == 'Linux':
-				#
-				# platformio.ini will accept this for a Linux upload port designation: 'upload_port = /media/media_name/drive'
-				#
-				drives = os.listdir(os.path.join(os.sep, 'media', getpass.getuser()))
-				if target_drive in drives:  # If target drive is found, use it.
-					target_drive_found = True
-					upload_disk = os.path.join(os.sep, 'media', getpass.getuser(), target_drive) + os.sep
-				else:
-					for drive in drives:
-						try:
-							files = os.listdir(os.path.join(os.sep, 'media', getpass.getuser(), drive))
-						except:
-							continue
-						else:
-							if target_filename in files:
-								upload_disk = os.path.join(os.sep, 'media', getpass.getuser(), drive) + os.sep
-								target_file_found = True
-								break
-				#
-				# set upload_port to drive if found
-				#
+def find_darwin_disk(target_drive, target_filename):
+    """Find the disk on MacOS containing the target drive or file."""
+    drives = os.listdir('/Volumes')
+    
+    if target_drive in drives:
+        return '/Volumes/' + target_drive + '/', True
+    
+    for drive in drives:
+        try:
+            filenames = os.listdir('/Volumes/' + drive + '/')
+        except:
+            continue
+        if target_filename in filenames:
+            return '/Volumes/' + drive + '/', False
+    return None, None
 
-				if target_file_found or target_drive_found:
-					env.Replace(
-						UPLOAD_FLAGS="-P$UPLOAD_PORT"
-					)
+def before_upload(source, target, env):
+    """Main function to determine the upload disk based on the current OS."""
+    upload_disk = None
+    target_file_found = False
+    target_drive_found = False
 
-			elif current_OS == 'Darwin':  # MAC
-				#
-				# platformio.ini will accept this for a OSX upload port designation: 'upload_port = /media/media_name/drive'
-				#
-				drives = os.listdir('/Volumes')  # human readable names
-				if target_drive in drives and not target_file_found:  # set upload if not found target file yet
-					target_drive_found = True
-					upload_disk = '/Volumes/' + target_drive + '/'
-				for drive in drives:
-					try:
-						filenames = os.listdir('/Volumes/' + drive + '/')   # will get an error if the drive is protected
-					except:
-						continue
-					else:
-						if target_filename in filenames:
-							if not target_file_found:
-								upload_disk = '/Volumes/' + drive + '/'
-							target_file_found = True
+    if current_OS == 'Windows':
+        upload_disk, target_drive_found = find_windows_disk(target_drive, target_filename)
+    elif current_OS == 'Linux':
+        upload_disk, target_drive_found = find_linux_disk(target_drive, target_filename)
+    elif current_OS == 'Darwin':
+        upload_disk, target_drive_found = find_darwin_disk(target_drive, target_filename)
+
+    if upload_disk:
+        if current_OS == 'Linux' and (target_file_found or target_drive_found):
+            env.Replace(UPLOAD_FLAGS="-P$UPLOAD_PORT")
+        return upload_disk
+    else:
+        print("Disk not found")
+        return None
+
 
 			#
 			# Set upload_port to drive if found
